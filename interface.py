@@ -8,6 +8,9 @@ import random
 
 MODEL_PATH = "chess_probability_model_32k.h5"
 model = load_model(MODEL_PATH)
+
+# Encoding functions
+
 def encode_positions(fens):
     encoded_positions = []
     for fen in fens:
@@ -24,30 +27,85 @@ def encode_positions(fens):
         encoded_positions.append(board_encoded + [turn])
     return np.array(encoded_positions)
 
-def encode_board_and_moves(board):
-    fen = board.fen()
-    position_encoding = encode_positions([fen])[0]  
-    legal_moves = list(board.legal_moves)
-    move_encoding = [hash(str(move)) % 1000 for move in legal_moves]
-    move_encoding = move_encoding[:64] + [0] * (64 - len(move_encoding))
-    return np.array([position_encoding]), np.array([move_encoding]), legal_moves
+def encode_legal_moves_and_probs(moves, probs):
+    max_moves = 64
+    legal_moves_vector = np.zeros(max_moves, dtype=np.float32)
+    prob_vector = np.zeros(max_moves, dtype=np.float32)
+
+    for move, prob in zip(moves, probs.values()):
+        try:
+            move_obj = chess.Move.from_uci(move)
+            if move_obj.to_square < max_moves:
+                move_index = move_obj.to_square
+                legal_moves_vector[move_index] = 1
+                prob_vector[move_index] = prob
+        except Exception as e:
+            print(f"Error encoding move {move}: {e}")
+
+    return legal_moves_vector, prob_vector
+
+def encode_previous_moves(previous_moves):
+    max_history = 10
+    max_moves = 64
+    history_vector = np.zeros((max_history, max_moves), dtype=np.float32)
+
+    for i, move in enumerate(previous_moves[-max_history:]):
+        try:
+            move_obj = chess.Move.from_uci(move)
+            if move_obj.to_square < max_moves:
+                move_index = move_obj.to_square
+                history_vector[i, move_index] = 1
+        except Exception as e:
+            print(f"Error encoding previous move {move}: {e}")
+
+    return history_vector.flatten()
+
+# Prediction function
 
 def predict_move(model, board):
-    position_encoding, move_encoding, legal_moves = encode_board_and_moves(board)
-    probabilities = model.predict([position_encoding, move_encoding])[0]
+    """
+    Predicts the best move for the current board state using the model.
+    Handles cases where no previous moves or probabilities are available.
+    """
+    fen = board.fen()
+    position_encoding = encode_positions([fen])[0]
 
-    normalized_probabilities = [probabilities[i] for i in range(len(legal_moves))]
-    total = sum(normalized_probabilities)
-    normalized_probabilities = [p / total for p in normalized_probabilities]
+    legal_moves = list(board.legal_moves)
+    legal_move_strs = [move.uci() for move in legal_moves]
+    if not legal_move_strs:
+        print("No legal moves available.")
+        return None
 
-    chosen_move = random.choices(
-        population=legal_moves,
-        weights=normalized_probabilities,
-        k=1
-    )[0]
+    # Assign uniform probabilities if none are available
+    probs = {move: 1 / len(legal_moves) for move in legal_move_strs}
 
-    move_probabilities = {move: probabilities[i] for i, move in enumerate(legal_moves)}
-    return chosen_move, move_probabilities
+    move_encoding, prob_vector = encode_legal_moves_and_probs(legal_move_strs, probs)
+    previous_moves_encoding = encode_previous_moves([])  # Provide empty history if not available
+    move_number_encoding = np.array([[board.fullmove_number]])
+
+    inputs = [
+        np.array([position_encoding]),
+        np.array([move_encoding]),
+        move_number_encoding,
+        np.array([previous_moves_encoding]),
+    ]
+
+    probabilities = model.predict(inputs)[0]
+
+    # Filter probabilities to only consider legal moves
+    legal_probabilities = {move: probabilities[chess.Move.from_uci(move).to_square] for move in legal_move_strs}
+    print(legal_probabilities)
+
+    moves = list(legal_probabilities.keys())
+    weights = list(legal_probabilities.values())
+
+    random_move_str = random.choices(moves, weights=weights, k=1)[0]  # `k=1` returns a single move
+    random_move = chess.Move.from_uci(random_move_str)
+    
+    return random_move
+
+
+# Game setup
 
 def start_game():
     root = tk.Tk()
@@ -114,21 +172,20 @@ def start_game():
             messagebox.showerror("Error", str(e))
 
     def ai_move():
-        move, probabilities = predict_move(model, board)
-        board.push(move)
-        draw_board()
-        print("AI move probabilities:", {str(m): p for m, p in probabilities.items()})
-        highest_prob_move = max(probabilities, key=probabilities.get)
-        highest_prob = probabilities[highest_prob_move]
-
-        print(f"Highest probability move: {highest_prob_move} with probability {highest_prob:.4f}")
-        print(f"Chosen move: {move} with probability {probabilities[move]:.4f}")
+        try:
+            move = predict_move(model, board)
+            if move is not None:
+                board.push(move)
+                draw_board()
+            else:
+                print("No valid move found. AI skips its turn.")
+        except Exception as e:
+            print(f"Error during AI move: {e}")
 
     canvas.bind("<Button-1>", on_drag_start)
     canvas.bind("<ButtonRelease-1>", on_drag_end)
 
     pieces = load_piece_images()
-
     draw_board()
     root.mainloop()
 
