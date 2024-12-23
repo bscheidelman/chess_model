@@ -75,4 +75,4 @@ def traverse_and_collect_data(fen, required_samples):
 
 
 
-traverse_and_collect_data(chess.STARTING_FEN, 320000)
+traverse_and_collect_data(chess.STARTING_FEN, 32000)
